@@ -1,10 +1,11 @@
 package cmd
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
+	"github.com/lmittmann/tint"
 	"github.com/spf13/cobra"
 )
 
@@ -38,8 +39,10 @@ containing pre-calculated hashes.`,
 		default:
 			lvl = slog.LevelInfo // デフォルトは Info
 		}
-		opts := &slog.HandlerOptions{Level: lvl}
-		handler := slog.NewTextHandler(os.Stderr, opts)
+		handler := tint.NewHandler(os.Stderr, &tint.Options{
+			Level:      lvl,
+			TimeFormat: time.Kitchen,
+		})
 		logger = slog.New(handler)
 		slog.SetDefault(logger) // 標準の slog 出力も設定
 
@@ -65,9 +68,6 @@ containing pre-calculated hashes.`,
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
-		// Cobra は通常エラーを出力するが、念のため
-		// logger は PersistentPreRunE で初期化されるため、Execute のエラー時には使えない可能性がある
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
