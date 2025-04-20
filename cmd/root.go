@@ -21,6 +21,8 @@ var rootCmd = &cobra.Command{
 	Long: `dltofu helps manage downloading external binaries or archives for CI/CD
 or development environments. It verifies downloads against a lock file
 containing pre-calculated hashes.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// ロガーの初期化
 		var lvl slog.Level
