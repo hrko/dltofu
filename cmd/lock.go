@@ -6,7 +6,6 @@ import (
 	"os"
 	"reflect"
 	"runtime"
-	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -57,16 +56,17 @@ func runLock(cmd *cobra.Command, args []string) error {
 	// 既存の Lock ファイルを読み込む (存在しなくてもエラーにはしない)
 	configDir := cfg.GetConfigDir()
 	existingLock, err := lock.LoadLockFile(configDir, logger)
-	if err != nil && !errors.Is(err, os.ErrNotExist) && !strings.Contains(err.Error(), "lock file not found") {
-		// 読み込み自体に失敗した場合 (JSON不正など) はエラー
-		logger.Error("Failed to load existing lock file, proceeding without it", "error", err)
-		existingLock = lock.NewLockFile(logger) // 空のLockファイルとして扱う
-	} else if existingLock == nil {
-		existingLock = lock.NewLockFile(logger) // 新規作成
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			// 読み込み自体に失敗した場合 (JSON不正など) はエラー
+			return fmt.Errorf("failed to load existing lock file: %w", err)
+		} else {
+			existingLock = lock.NewLockFile(logger) // 新規作成
+		}
 	}
 
 	// 新しいLockファイルデータを準備
-	newLock := lock.NewLockFile(logger)
+	newLock := existingLock.Copy()
 
 	// ダウンローダー準備
 	downloader := download.NewDownloader(0, logger) // Timeout はデフォルト

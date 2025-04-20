@@ -40,6 +40,25 @@ func NewLockFile(logger *slog.Logger) *LockFile {
 	}
 }
 
+// Copy は LockFile のコピーを作成する
+func (lf *LockFile) Copy() *LockFile {
+	lf.mu.RLock() // 読み取りロック
+	defer lf.mu.RUnlock()
+	copiedFiles := make(map[FileID]map[ResolvedURL]*hash.Hash)
+	for fileID, fileLocks := range lf.Files {
+		copiedLocks := make(map[ResolvedURL]*hash.Hash)
+		for resolvedURL, hash := range fileLocks {
+			copiedLocks[resolvedURL] = hash.Copy()
+		}
+		copiedFiles[fileID] = copiedLocks
+	}
+	return &LockFile{
+		Version: lf.Version,
+		Files:   copiedFiles,
+		logger:  lf.logger,
+	}
+}
+
 // LoadLockFile は指定されたディレクトリから dltofu.lock を読み込む
 func LoadLockFile(dirPath string, logger *slog.Logger) (*LockFile, error) {
 	if logger == nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -64,6 +65,13 @@ func (h *Hash) UnmarshalJSON(data []byte) error {
 	h.Algorithm = algorithm
 	h.HashValue = hashBytes
 	return nil
+}
+
+func (h *Hash) Copy() *Hash {
+	return &Hash{
+		Algorithm: h.Algorithm,
+		HashValue: slices.Clone(h.HashValue),
+	}
 }
 
 func NewHash(algorithm HashAlgorithm, hashValue []byte) *Hash {
