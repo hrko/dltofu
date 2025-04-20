@@ -13,7 +13,7 @@ var goosMap = map[string]string{
 }
 
 var goarchMap = map[string]string{
-	"amd64": "amd64",
+	"amd64": "x86_64",
 	"arm64": "arm64",
 }
 
@@ -37,9 +37,6 @@ func GetCurrentArch() (string, error) {
 
 // IsValidPlatform は指定された識別子がサポートされているか返す
 func IsValidPlatform(p string) bool {
-	if _, ok := goosMap[p]; !ok {
-		return false
-	}
 	for _, v := range goosMap {
 		if v == p {
 			return true
@@ -50,9 +47,6 @@ func IsValidPlatform(p string) bool {
 
 // IsValidArch は指定された識別子がサポートされているか返す
 func IsValidArch(a string) bool {
-	if _, ok := goarchMap[a]; !ok {
-		return false
-	}
 	for _, v := range goarchMap {
 		if v == a {
 			return true
