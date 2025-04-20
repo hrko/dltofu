@@ -1,10 +1,10 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -15,8 +15,8 @@ import (
 
 	"github.com/hrko/dltofu/internal/config"
 	"github.com/hrko/dltofu/internal/download"
-	"github.com/hrko/dltofu/internal/hash"
 	"github.com/hrko/dltofu/internal/lock"
+	"github.com/hrko/dltofu/internal/model"
 	"github.com/hrko/dltofu/internal/template"
 )
 
@@ -60,13 +60,13 @@ func runLock(cmd *cobra.Command, args []string) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) && !strings.Contains(err.Error(), "lock file not found") {
 		// 読み込み自体に失敗した場合 (JSON不正など) はエラー
 		logger.Error("Failed to load existing lock file, proceeding without it", "error", err)
-		existingLock = lock.NewLockFile(cfg.HashAlgorithm, logger) // 空のLockファイルとして扱う
+		existingLock = lock.NewLockFile(logger) // 空のLockファイルとして扱う
 	} else if existingLock == nil {
-		existingLock = lock.NewLockFile(cfg.HashAlgorithm, logger) // 新規作成
+		existingLock = lock.NewLockFile(logger) // 新規作成
 	}
 
 	// 新しいLockファイルデータを準備
-	newLock := lock.NewLockFile(cfg.HashAlgorithm, logger)
+	newLock := lock.NewLockFile(logger)
 
 	// ダウンローダー準備
 	downloader := download.NewDownloader(0, logger) // Timeout はデフォルト
@@ -79,7 +79,7 @@ func runLock(cmd *cobra.Command, args []string) error {
 	g, ctx := errgroup.WithContext(ctx) // エラーが発生したら他のゴルーチンもキャンセル
 
 	// アクティブなファイルとURLのセット (Prune用)
-	activeFiles := make(map[string]map[string]struct{})
+	activeFiles := make(map[lock.FileID]map[lock.ResolvedURL]struct{})
 	var activeFilesMu sync.Mutex // activeFiles へのアクセス保護
 
 	// 設定ファイルの各ファイルを処理
@@ -125,14 +125,14 @@ func runLock(cmd *cobra.Command, args []string) error {
 						// アクティブな URL として記録
 						activeFilesMu.Lock()
 						if _, ok := activeFiles[fileID]; !ok {
-							activeFiles[fileID] = make(map[string]struct{})
+							activeFiles[fileID] = make(map[model.ResolvedURL]struct{})
 						}
 						activeFiles[fileID][resolvedURL] = struct{}{}
 						activeFilesMu.Unlock()
 
 						// ダウンロードしてハッシュ計算
 						hashAlgo := cfg.GetEffectiveHashAlgorithm(fileID, pID, aID)
-						formattedHash, err := downloadAndHash(ctx, downloader, resolvedURL, hashAlgo)
+						hash, err := downloader.Hash(resolvedURL, hashAlgo)
 						if err != nil {
 							logger.Error("Failed to download or hash", "file_id", fileID, "platform", pID, "arch", aID, "url", resolvedURL, "error", err)
 							// ダウンロード失敗は lock コマンドではエラーにする (URLが間違っている可能性)
@@ -141,13 +141,13 @@ func runLock(cmd *cobra.Command, args []string) error {
 
 						// 新しい Lock データに設定 (既存チェック含む)
 						// SetHash はスレッドセーフにする必要がある
-						err = newLock.SetHash(fileID, resolvedURL, formattedHash)
+						err = newLock.SetHash(fileID, resolvedURL, hash)
 						if err != nil {
 							logger.Error("Hash inconsistency detected", "file_id", fileID, "platform", pID, "arch", aID, "url", resolvedURL, "error", err)
 							// ハッシュ不整合は致命的エラー
 							return fmt.Errorf("hash inconsistency for %s (%s/%s) URL %s: %w", fileID, pID, aID, resolvedURL, err)
 						}
-						logger.Info("Processed", "file_id", fileID, "platform", pID, "arch", aID, "url", resolvedURL, "hash", formattedHash)
+						logger.Info("Processed", "file_id", fileID, "platform", pID, "arch", aID, "url", resolvedURL, "hash", hash)
 
 						return nil
 					})
@@ -173,26 +173,26 @@ func runLock(cmd *cobra.Command, args []string) error {
 				// アクティブな URL として記録
 				activeFilesMu.Lock()
 				if _, ok := activeFiles[fileID]; !ok {
-					activeFiles[fileID] = make(map[string]struct{})
+					activeFiles[fileID] = make(map[model.ResolvedURL]struct{})
 				}
 				activeFiles[fileID][resolvedURL] = struct{}{}
 				activeFilesMu.Unlock()
 
 				// ダウンロードしてハッシュ計算
 				hashAlgo := cfg.GetEffectiveHashAlgorithm(fileID, "", "")
-				formattedHash, err := downloadAndHash(ctx, downloader, resolvedURL, hashAlgo)
+				hash, err := downloader.Hash(resolvedURL, hashAlgo)
 				if err != nil {
 					logger.Error("Failed to download or hash", "file_id", fileID, "url", resolvedURL, "error", err)
 					return fmt.Errorf("failed download/hash for %s URL %s: %w", fileID, resolvedURL, err)
 				}
 
 				// 新しい Lock データに設定
-				err = newLock.SetHash(fileID, resolvedURL, formattedHash)
+				err = newLock.SetHash(fileID, resolvedURL, hash)
 				if err != nil {
 					logger.Error("Hash inconsistency detected", "file_id", fileID, "url", resolvedURL, "error", err)
 					return fmt.Errorf("hash inconsistency for %s URL %s: %w", fileID, resolvedURL, err)
 				}
-				logger.Info("Processed", "file_id", fileID, "url", resolvedURL, "hash", formattedHash)
+				logger.Info("Processed", "file_id", fileID, "url", resolvedURL, "hash", hash)
 
 				return nil
 			})
@@ -215,11 +215,11 @@ func runLock(cmd *cobra.Command, args []string) error {
 	// 念のため Prune を実行する。
 	newLock.Prune(activeFiles)
 
-	// 古いロックファイルと新しいロックファイルを比較し、変更があったか確認 (オプション)
-	// if reflect.DeepEqual(existingLock.Files, newLock.Files) {
-	//     logger.Info("Lock file is already up to date.")
-	//     return nil
-	// }
+	// 古いロックファイルと新しいロックファイルを比較し、変更があったか確認
+	if reflect.DeepEqual(existingLock.Files, newLock.Files) {
+		logger.Info("Lock file is already up to date.")
+		return nil
+	}
 
 	// 新しいLockファイルを保存
 	err = newLock.Save(configDir)
@@ -229,34 +229,4 @@ func runLock(cmd *cobra.Command, args []string) error {
 
 	logger.Info("Lock command finished successfully")
 	return nil
-}
-
-// downloadAndHash は一時的にファイルをダウンロードし、ハッシュを計算して返す
-func downloadAndHash(ctx context.Context, downloader *download.Downloader, url, algo string) (string, error) {
-	select {
-	case <-ctx.Done(): // Check if context is cancelled before starting download
-		return "", ctx.Err()
-	default:
-	}
-
-	// 一時ファイルにダウンロード
-	tempFilePath, err := downloader.FetchToTemp(url)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch to temp: %w", err)
-	}
-	defer os.Remove(tempFilePath) // 計算が終わったら必ず削除
-
-	select {
-	case <-ctx.Done(): // Check if context is cancelled before starting hash calculation
-		return "", ctx.Err()
-	default:
-	}
-
-	// ハッシュ計算
-	hashValue, err := hash.CalculateFile(tempFilePath, algo)
-	if err != nil {
-		return "", fmt.Errorf("failed to calculate hash for %s: %w", url, err)
-	}
-
-	return hash.FormatHash(algo, hashValue), nil
 }

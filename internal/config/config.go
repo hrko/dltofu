@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/hrko/dltofu/internal/hash" // 自身のモジュールパス
+	"github.com/hrko/dltofu/internal/model"
 	"github.com/hrko/dltofu/internal/platform"
-	"github.com/hrko/dltofu/internal/template"
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,10 +17,10 @@ const CurrentVersion = "v1"
 
 // Config は設定ファイル全体を表す構造体
 type Config struct {
-	Version       string             `yaml:"version"`
-	HashAlgorithm string             `yaml:"hash_algorithm,omitempty"` // デフォルトは sha256
-	Files         map[string]FileDef `yaml:"files"`                    // キーはファイル識別子
-	path          string             // 設定ファイルのパス (相対パス解決用)
+	Version       string                   `yaml:"version"`
+	HashAlgorithm hash.HashAlgorithm       `yaml:"hash_algorithm,omitempty"` // デフォルトは sha256
+	Files         map[model.FileID]FileDef `yaml:"files"`                    // キーはファイル識別子
+	path          string                   // 設定ファイルのパス (相対パス解決用)
 	logger        *slog.Logger
 }
 
@@ -34,16 +34,16 @@ type FileDef struct {
 	IsArchive       bool                       `yaml:"is_archive,omitempty"`
 	StripComponents int                        `yaml:"strip_components,omitempty"`
 	ExtractPaths    []string                   `yaml:"extract_paths,omitempty"`
-	HashAlgorithm   string                     `yaml:"hash_algorithm,omitempty"` // ファイル固有設定
+	HashAlgorithm   hash.HashAlgorithm         `yaml:"hash_algorithm,omitempty"` // ファイル固有設定
 	Overrides       map[string]OverrideFileDef `yaml:"overrides,omitempty"`      // key: "platform/arch" (e.g., "linux/amd64")
 }
 
 // OverrideFileDef はプラットフォーム/アーキテクチャごとの上書き設定
 type OverrideFileDef struct {
-	URL           string   `yaml:"url,omitempty"`
-	Destination   string   `yaml:"destination,omitempty"`
-	HashAlgorithm string   `yaml:"hash_algorithm,omitempty"`
-	ExtractPaths  []string `yaml:"extract_paths,omitempty"`
+	URL           string             `yaml:"url,omitempty"`
+	Destination   string             `yaml:"destination,omitempty"`
+	HashAlgorithm hash.HashAlgorithm `yaml:"hash_algorithm,omitempty"`
+	ExtractPaths  []string           `yaml:"extract_paths,omitempty"`
 	// IsArchive や StripComponents は通常 Override しない想定だが、必要なら追加
 }
 
@@ -180,7 +180,7 @@ func (c *Config) GetConfigDir() string {
 
 // GetEffectiveHashAlgorithm はファイル定義とグローバル設定を考慮して、
 // 特定のファイル (または Override) に適用されるハッシュアルゴリズムを返す
-func (c *Config) GetEffectiveHashAlgorithm(fileID, platformID, archID string) string {
+func (c *Config) GetEffectiveHashAlgorithm(fileID model.FileID, platformID, archID string) hash.HashAlgorithm {
 	fileDef, ok := c.Files[fileID]
 	if !ok {
 		// 通常は呼び出し元でチェックされるはず
@@ -205,16 +205,14 @@ func (c *Config) GetEffectiveHashAlgorithm(fileID, platformID, archID string) st
 
 // --- Helper functions to get effective values considering overrides ---
 
-func (f *FileDef) GetEffectiveURL(platformValue, archValue, version string) (string, error) {
-	// TODO: Implement logic considering overrides
-	// この関数は template 処理と統合する方が良いかもしれない
-	// ここでは単純化のため、Override は呼び出し側で先にチェックする想定
-	data := template.TemplateData{
-		Version:      version,
-		Platform:     platformValue,
-		Architecture: archValue,
+func (f *FileDef) GetEffectiveURLTemplate(platformID, archID string) string {
+	if platformID != "" && archID != "" {
+		overrideKey := platformID + "/" + archID
+		if overrideDef, ok := f.Overrides[overrideKey]; ok && overrideDef.URL != "" {
+			return overrideDef.URL
+		}
 	}
-	return template.ResolveURL(f.URL, data)
+	return f.URL
 }
 
 // GetEffectiveDestination は Override を考慮した Destination を返す

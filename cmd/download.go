@@ -106,15 +106,7 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		}
 
 		// URL 解決
-		overrideKey := ""
-		if targetPlatformID != "" && targetArchID != "" {
-			overrideKey = targetPlatformID + "/" + targetArchID
-		}
-
-		urlTemplate := fileDef.URL
-		if overrideDef, ok := fileDef.Overrides[overrideKey]; ok && overrideDef.URL != "" {
-			urlTemplate = overrideDef.URL
-		}
+		urlTemplate := fileDef.GetEffectiveURLTemplate(targetPlatformID, targetArchID)
 		tmplData := template.TemplateData{
 			Version:      fileDef.Version,
 			Platform:     platformValue,
@@ -129,9 +121,10 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		logger.Debug("Resolved URL for download", "file_id", fileID, "url", resolvedURL)
 
 		// Lock ファイルから期待されるハッシュ値を取得
-		expectedHash, found := lockFile.GetHash(fileID, resolvedURL)
-		if !found {
-			logger.Error("Hash not found in lock file for resolved URL", "file_id", fileID, "url", resolvedURL)
+		expectedHash, err := lockFile.GetHash(fileID, resolvedURL)
+		if err != nil {
+			// ハッシュが見つからないか、不正な形式の場合
+			logger.Error("Failed to get hash from lock file", "file_id", fileID, "url", resolvedURL, "error", err)
 			hasError = true
 			continue // 次のファイルへ
 		}
@@ -141,7 +134,7 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		dest := fileDef.GetEffectiveDestination(targetPlatformID, targetArchID)
 		if dest == "" {
 			// Destination が未指定の場合、URLからファイル名を推測してカレントディレクトリに置く
-			urlParts := strings.Split(resolvedURL, "/")
+			urlParts := strings.Split(string(resolvedURL), "/")
 			dest = urlParts[len(urlParts)-1] // URLの最後の部分をファイル名とする
 			logger.Debug("Destination not specified, using filename from URL", "file_id", fileID, "destination", dest)
 			// この場合、設定ファイル基準ではなくカレントディレクトリ基準とする
@@ -198,7 +191,8 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		var downloadedFilePath string
 		if fileDef.IsArchive {
 			// 一時ファイルにダウンロード
-			tempArchiveFile, err := os.CreateTemp("", fmt.Sprintf("dltofu-%s-*.tmp", fileID))
+			var tempArchiveFile *os.File
+			tempArchiveFile, err = os.CreateTemp("", fmt.Sprintf("dltofu-%s-*.tmp", fileID))
 			if err != nil {
 				logger.Error("Failed to create temporary file for archive download", "file_id", fileID, "error", err)
 				hasError = true
@@ -209,12 +203,12 @@ func runDownload(cmd *cobra.Command, args []string) error {
 			defer os.Remove(downloadedFilePath) // 展開後またはエラー時に削除
 
 			logger.Debug("Downloading archive to temporary file", "file_id", fileID, "url", resolvedURL, "temp_path", downloadedFilePath)
-			err = downloader.FetchToFile(resolvedURL, downloadedFilePath, expectedHash)
+			err = downloader.FetchToFileWithHashCheck(resolvedURL, downloadedFilePath, expectedHash)
 		} else {
 			// 通常ファイルは直接ダウンロード先に保存 (FetchToFile内で上書き処理も行う)
 			downloadedFilePath = dest
 			logger.Debug("Downloading file directly", "file_id", fileID, "url", resolvedURL, "destination", downloadedFilePath)
-			err = downloader.FetchToFile(resolvedURL, downloadedFilePath, expectedHash)
+			err = downloader.FetchToFileWithHashCheck(resolvedURL, downloadedFilePath, expectedHash)
 		}
 
 		if err != nil {

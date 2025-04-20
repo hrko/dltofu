@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"text/template"
+
+	"github.com/hrko/dltofu/internal/model"
 )
 
 // TemplateData はURLテンプレートに渡されるデータ
@@ -14,7 +16,7 @@ type TemplateData struct {
 }
 
 // ResolveURL はテンプレート文字列とデータを使ってURLを生成する
-func ResolveURL(urlTemplate string, data TemplateData) (string, error) {
+func ResolveURL(urlTemplate string, data TemplateData) (model.ResolvedURL, error) {
 	tmpl, err := template.New("url").Parse(urlTemplate)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse URL template: %w", err)
@@ -27,5 +29,5 @@ func ResolveURL(urlTemplate string, data TemplateData) (string, error) {
 		return "", fmt.Errorf("failed to execute URL template: %w", err)
 	}
 
-	return buf.String(), nil
+	return model.ResolvedURL(buf.String()), nil
 }

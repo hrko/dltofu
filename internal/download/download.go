@@ -1,7 +1,6 @@
 package download
 
 import (
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hrko/dltofu/internal/hash" // 自身のモジュールパス
+	"github.com/hrko/dltofu/internal/model"
 )
 
 const DefaultTimeout = 60 * time.Second
@@ -38,9 +38,13 @@ func NewDownloader(timeout time.Duration, logger *slog.Logger) *Downloader {
 	}
 }
 
-// FetchToFile は指定されたURLからファイルをダウンロードし、指定されたパスに保存する
-// expectedFormattedHash が空文字列でなければ、ダウンロード中にハッシュ検証を行う
-func (d *Downloader) FetchToFile(url, destPath, expectedFormattedHash string) error {
+// FetchToFileWithHashCheck は指定されたURLからファイルをダウンロードし、
+// 指定されたパスに保存すると同時に、ハッシュ値を計算して検証する。
+func (d *Downloader) FetchToFileWithHashCheck(url model.ResolvedURL, destPath string, expectedHash *hash.Hash) error {
+	if expectedHash == nil {
+		return fmt.Errorf("expected hash is nil")
+	}
+
 	d.logger.Debug("Starting download", "url", url, "destination", destPath)
 
 	// ディレクトリが存在しない場合は作成
@@ -66,68 +70,25 @@ func (d *Downloader) FetchToFile(url, destPath, expectedFormattedHash string) er
 		}
 	}()
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request for %s: %w", url, err)
-	}
-	// 必要であれば User-Agent などを設定
-	// req.Header.Set("User-Agent", "dltofu/...")
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to download from %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// TODO: レスポンスボディを読んで詳細なエラーメッセージを表示する？
-		return fmt.Errorf("failed to download from %s: received status code %d", url, resp.StatusCode)
-	}
-
 	// ダウンロードとハッシュ計算/ファイル書き込み
-	var reader io.Reader = resp.Body
-	if expectedFormattedHash != "" {
-		// ハッシュ検証を行う場合、TeeReader で読みながらハッシュ計算とファイル書き込み
-		expectedAlgo, _, err := hash.ParseHash(expectedFormattedHash)
-		if err != nil {
-			return fmt.Errorf("invalid expected hash format '%s': %w", expectedFormattedHash, err)
-		}
-		hasher, _ := hash.GetHasher(expectedAlgo) // エラーチェックは ParseHash で済んでいる想定
-		reader = io.TeeReader(resp.Body, hasher)
-
-		// ストリームをファイルに書き込む
-		_, err = io.Copy(tmpFile, reader)
-		if err != nil {
-			return fmt.Errorf("failed to write downloaded content to %s: %w", tmpFilePath, err)
-		}
-		// 書き込みが終わってからハッシュを比較
-		actualHash := hex.EncodeToString(hasher.Sum(nil))
-		actualFormattedHash := hash.FormatHash(expectedAlgo, actualHash)
-		if actualFormattedHash != expectedFormattedHash {
-			return fmt.Errorf("hash mismatch for %s: expected %s, got %s", url, expectedFormattedHash, actualFormattedHash)
-		}
-		d.logger.Debug("Hash verified successfully", "url", url, "hash", actualFormattedHash)
-
-	} else {
-		// ハッシュ検証なしの場合、そのままファイルに書き込む (lock コマンド用)
-		_, err = io.Copy(tmpFile, reader)
-		if err != nil {
-			return fmt.Errorf("failed to write downloaded content to %s: %w", tmpFilePath, err)
-		}
-		d.logger.Debug("Downloaded file without hash verification", "url", url)
+	actualHash, err := d.FetchAndHash(url, expectedHash.Algorithm, tmpFile)
+	if err != nil {
+		return fmt.Errorf("failed to download and calculate hash: %w", err)
 	}
+	if !actualHash.Equal(expectedHash) {
+		return fmt.Errorf("hash mismatch for %s: expected %s, got %s", url, expectedHash, actualHash)
+	}
+	d.logger.Debug("Hash verified successfully", "url", url, "hash", actualHash)
 
 	// 一時ファイルを最終的なパスにリネーム (アトミック操作)
 	// tmpFile を閉じる必要がある
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temporary file %s: %w", tmpFilePath, err)
 	}
-
 	d.logger.Debug("Renaming temporary file", "from", tmpFilePath, "to", destPath)
 	err = os.Rename(tmpFilePath, destPath)
 	if err != nil {
-		// Rename が失敗した場合、一時ファイルは残っている可能性がある
-		// defer での削除に任せる
+		// Rename が失敗した場合、一時ファイルは残っている可能性があるが、defer での削除に任せる
 		return fmt.Errorf("failed to rename temporary file %s to %s: %w", tmpFilePath, destPath, err)
 	}
 
@@ -135,47 +96,62 @@ func (d *Downloader) FetchToFile(url, destPath, expectedFormattedHash string) er
 	return nil
 }
 
-// FetchToTemp は URL からダウンロードし、一時ファイルに保存してそのパスを返す
-// 主に lock コマンドでハッシュ計算のために一時的にダウンロードする際に使用
-func (d *Downloader) FetchToTemp(url string) (string, error) {
-	d.logger.Debug("Starting temporary download", "url", url)
+// FetchAndHash は指定されたURLからファイルをダウンロードし、io.Writer に書き込む。
+// ダウンロードと同時に、algorithm で指定されたアルゴリズムを使用してハッシュ値を計算する。
+func (d *Downloader) FetchAndHash(url model.ResolvedURL, algorithm hash.HashAlgorithm, writer io.Writer) (*hash.Hash, error) {
+	d.logger.Debug("Starting download and hash calculation", "url", url, "algorithm", algorithm)
 
-	// 一時ファイルを作成 (システム標準の一時ディレクトリを使用)
-	tmpFile, err := os.CreateTemp("", "dltofu-*.tmp")
+	resp, err := d.open(url)
 	if err != nil {
-		return "", fmt.Errorf("failed to create temporary file: %w", err)
+		return nil, fmt.Errorf("failed to open %s: %w", url, err)
 	}
-	tmpPath := tmpFile.Name()
-	// ここでは defer で削除しない。呼び出し元が責任を持つ。
-	// (ハッシュ計算が終わったら削除するため)
-	d.logger.Debug("Created temporary file for hashing", "path", tmpPath)
-	defer tmpFile.Close() // Close は必須
+	defer resp.Close()
 
-	req, err := http.NewRequest("GET", url, nil)
+	hash, err := hash.CalculateStreamTee(resp, writer, algorithm)
 	if err != nil {
-		_ = os.Remove(tmpPath) // エラー時は一時ファイルを削除
-		return "", fmt.Errorf("failed to create request for %s: %w", url, err)
+		return nil, fmt.Errorf("failed to calculate hash for %s: %w", url, err)
+	}
+
+	d.logger.Debug("Downloaded and hashed successfully", "url", url, "hash", hash)
+	return hash, nil
+}
+
+// Hash は指定されたURLからファイルをダウンロードし、
+// 指定されたアルゴリズムでハッシュ値を計算して返す。
+// ただし、ファイルは保存せず、io.Writer に書き込むこともない。
+func (d *Downloader) Hash(url model.ResolvedURL, algorithm hash.HashAlgorithm) (*hash.Hash, error) {
+	d.logger.Debug("Starting hash calculation", "url", url, "algorithm", algorithm)
+
+	resp, err := d.open(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", url, err)
+	}
+	defer resp.Close()
+
+	hash, err := hash.CalculateStream(resp, algorithm)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate hash for %s: %w", url, err)
+	}
+
+	d.logger.Debug("Hash calculated successfully", "url", url, "hash", hash)
+	return hash, nil
+}
+
+// open は指定されたURLからHTTP GETリクエストを作成し、レスポンスボディを返す。
+func (d *Downloader) open(url model.ResolvedURL) (io.ReadCloser, error) {
+	req, err := http.NewRequest("GET", string(url), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for %s: %w", url, err)
 	}
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("failed to download from %s: %w", url, err)
+		return nil, fmt.Errorf("failed to download from %s: %w", url, err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("failed to download from %s: received status code %d", url, resp.StatusCode)
+		resp.Body.Close()
+		return nil, fmt.Errorf("failed to download from %s: received status code %d", url, resp.StatusCode)
 	}
 
-	// ファイルに書き込み
-	_, err = io.Copy(tmpFile, resp.Body)
-	if err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("failed to write downloaded content to %s: %w", tmpPath, err)
-	}
-
-	d.logger.Debug("File downloaded to temporary location", "url", url, "path", tmpPath)
-	return tmpPath, nil // 一時ファイルのパスを返す
+	return resp.Body, nil
 }
